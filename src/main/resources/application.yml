@@ -1,0 +1,44 @@
+server:
+  port: 8081
+
+spring:
+  # Redis 配置
+  data:
+    redis:
+      host: localhost
+      port: 6379
+
+  # Spring AI 配置
+  ai:
+    # Ollama 大模型
+    ollama:
+      base-url: http://localhost:11434
+      chat:
+        model: deepseek-r1
+        options:
+          timeout: 120000  # 👈 120秒超时（必须！）
+          connect-timeout: 30000
+          read-timeout: 120000
+      embedding:
+        model: bge-m3
+
+    # 向量库 Milvus
+    vectorstore:
+      milvus:
+        client:
+          host: localhost
+          port: 19530
+        database: default
+        collection-name: rag_tender_kb
+        initialize-schema: true
+        embedding-dimension: 1024  # 👈 加这一行！！！
+
+  servlet:
+    multipart:
+      max-file-size: 100MB
+      max-request-size: 100MB
+      resolve-lazily: true   # 核心：延迟解析，适配异步
+# python文档解析服务
+python:
+  parser:
+    enabled: true  # 默认关闭，走Java；开启=true

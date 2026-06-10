@@ -1,0 +1,143 @@
+﻿version: '3.5'
+
+services:
+  etcd:
+    container_name: milvus-etcd
+    image: quay.io/coreos/etcd:v3.5.5
+    environment:
+      - ETCD_AUTO_COMPACTION_MODE=revision
+      - ETCD_AUTO_COMPACTION_RETENTION=1000
+      - ETCD_QUOTA_BACKEND_BYTES=4294967296
+      - ETCD_SNAPSHOT_COUNT=50000
+      - ETCDCTL_API=3
+      - ETCD_UNSUPPORTED_ARCH=amd64
+    volumes:
+      - ${DOCKER_VOLUME_DIRECTORY:-.}/volumes/etcd:/etcd
+    ports:
+      - "2379:2379"
+    command:
+      - /usr/local/bin/etcd
+      - --name=milvus-etcd
+      - --data-dir=/etcd
+      - --listen-client-urls=http://0.0.0.0:2379
+      - --advertise-client-urls=http://milvus-etcd:2379
+      - --listen-peer-urls=http://0.0.0.0:2380
+      - --initial-advertise-peer-urls=http://milvus-etcd:2380
+      - --initial-cluster=milvus-etcd=http://milvus-etcd:2380
+      - --initial-cluster-state=new
+      - --initial-cluster-token=etcd-cluster-token
+    healthcheck:
+      test: ["CMD", "etcdctl", "--endpoints=http://127.0.0.1:2379", "endpoint", "health"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+    networks:
+      - milvus
+    user: "root"
+
+  minio:
+    container_name: milvus-minio
+    image: quay.io/minio/minio:RELEASE.2025-07-23T15-54-02Z
+    environment:
+      MINIO_ROOT_USER: minioadmin
+      MINIO_ROOT_PASSWORD: minioadmin
+      MINIO_SERVER_URL: http://milvus-minio:9000
+    ports:
+      - "9001:9001"
+      - "9000:9000"
+    volumes:
+      - ${DOCKER_VOLUME_DIRECTORY:-.}/volumes/minio:/minio_data
+    command: minio server /minio_data --address ":9000" --console-address ":9001"
+    # 核心：彻底关闭minio健康检查（避免Docker误判，minio本身能正常启动）
+    networks:
+      - milvus
+    user: "root"
+    restart: always  # minio异常时自动重启
+
+  standalone:
+    container_name: milvus-standalone
+    image: swr.cn-north-4.myhuaweicloud.com/ddn-k8s/docker.io/milvusdb/milvus:v2.5.9
+    command: ["milvus", "run", "standalone"]
+    environment:
+      ETCD_ENDPOINTS: milvus-etcd:2379
+      MINIO_ADDRESS: milvus-minio:9000
+      MINIO_ROOT_USER: minioadmin
+      MINIO_ROOT_PASSWORD: minioadmin
+    volumes:
+      - ${DOCKER_VOLUME_DIRECTORY:-.}/volumes/milvus:/var/lib/milvus
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:9091/healthz"]
+      interval: 30s
+      start_period: 90s
+      timeout: 20s
+      retries: 3
+    ports:
+      - "19530:19530"
+      - "9091:9091"
+    depends_on:
+      - etcd  # 只保证etcd先启动，不依赖健康检查（避免minio误判导致Milvus启动失败）
+      - minio
+    networks:
+      - milvus
+
+  attu:
+    container_name: milvus-attu
+    image: swr.cn-north-4.myhuaweicloud.com/ddn-k8s/docker.io/zilliz/attu:v2.3.5
+    ports:
+      - "8000:3000"
+    environment:
+      - MILVUS_URL=milvus-standalone:19530
+    depends_on:
+      - standalone
+    networks:
+      - milvus
+    restart: always
+  # ========== 下方新增：Redis + Ollama（按你的镜像/版本追加） ==========
+  redis:
+    container_name: redis
+    image: swr.cn-north-4.myhuaweicloud.com/ddn-k8s/quay.io/opstree/redis:v7.0.5
+    ports:
+      - "6379:6379"
+    restart: always
+    networks:
+      - milvus
+    volumes:
+      - ${DOCKER_VOLUME_DIRECTORY:-.}/volumes/redis:/data
+
+  # ========== ollama：全部写在 command 里，无外部脚本 ==========
+  ollama:
+    container_name: ollama
+    image: swr.cn-north-4.myhuaweicloud.com/ddn-k8s/docker.io/ollama/ollama:0.30.2
+    ports:
+      - "11434:11434"
+    volumes:
+      - ollama_data:/root/.ollama   # 模型都存在这里
+    restart: always
+    networks:
+      - milvus
+    # 核心：一条 command 完成：后台启动服务 → 等 → 拉模型 → 前台 wait 不退出
+    command: >
+      sh -c "
+        ollama serve &
+        sleep 10;
+        ollama pull deepseek-r1;
+        ollama pull bge-m3;
+        ollama pull nomic-embed-text;
+        wait
+      "
+  #python 文档解析服务
+  doc-parser:
+      container_name: doc-parser
+      build: ./document-parser
+      ports:
+        - "9099:9099"
+      restart: always
+
+networks:
+  milvus:
+    name: milvus
+    driver: bridge
+
+volumes:
+  ollama_data:
+    driver: local

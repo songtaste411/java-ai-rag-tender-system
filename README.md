@@ -1,3 +1,4 @@
+# 本项目仅作学习交流使用，请勿用于商业用途。
 # 招投标知识库 RAG 智能问答系统
 基于 Java + Spring AI + LangChain4j + Milvus 构建的企业级 RAG 项目
 用于招标文件智能解析、语义检索、智能问答、多轮对话
@@ -23,3 +24,14 @@
 
 ## 项目架构
 文档解析 → 分块 → 向量化 → 向量库 → 多路召回 → 大模型生成答案
+## 本地调试说明
+
+1. 启动容器
+docker compose up -d 
+确保容器启动成功
+docker ps
+镜像搜索地址：https://docker.aityp.com/
+3. 本地启动RagApplication
+4. 关闭容器命令
+docker compose down
+
