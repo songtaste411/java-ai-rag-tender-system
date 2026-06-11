@@ -1,0 +1,89 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <title>文档混合分块工具</title>
+    <style>
+        body { margin: 30px; font-family: sans-serif; }
+        .item { margin: 10px 0; }
+        textarea { width: 100%; height: 200px; margin-top: 10px; }
+        button { padding: 6px 16px; cursor: pointer; }
+    </style>
+</head>
+<body>
+<h3>PDF / DOCX 解析 + 章节+滑动窗口分块</h3>
+
+<!-- 参数配置 -->
+<div class="item">
+    窗口大小：
+    <input type="number" id="winSize" value="800" min="100">
+</div>
+<div class="item">
+    重叠长度：
+    <input type="number" id="overlap" value="150" min="20">
+</div>
+<div class="item">
+    章节最小长度：
+    <input type="number" id="chapMin" value="300" min="50">
+</div>
+
+<!-- 文件上传 -->
+<div class="item">
+    <input type="file" id="file" accept=".pdf,.docx,.txt">
+</div>
+
+<!-- 提交按钮 -->
+<div class="item">
+    <button onclick="uploadFile()">开始解析分块</button>
+</div>
+
+<!-- 结果展示 -->
+<div>
+    <p id="tip"></p>
+    <textarea id="result" readonly placeholder="分块结果将展示在这里..."></textarea>
+</div>
+
+<script>
+    async function uploadFile() {
+        const fileInput = document.getElementById('file');
+        const tip = document.getElementById('tip');
+        const result = document.getElementById('result');
+
+        // 清空旧内容
+        tip.innerText = "";
+        result.value = "";
+
+        const file = fileInput.files[0];
+        if (!file) {
+            tip.innerText = "请先选择文件";
+            return;
+        }
+
+        // 组装表单数据
+        const formData = new FormData();
+        formData.append("file", file);
+        formData.append("window_size", document.getElementById('winSize').value);
+        formData.append("overlap_size", document.getElementById('overlap').value);
+        formData.append("chapter_min_len", document.getElementById('chapMin').value);
+
+        try {
+            const res = await fetch("/api/parse-chunk", {
+                method: "POST",
+                body: formData
+            });
+            const data = await res.json();
+
+            if (data.code === 0) {
+                tip.innerText = `解析成功，共 ${data.chunks.length} 个分块`;
+                // 用分割线拼接所有分块
+                result.value = data.chunks.join("\n-------- 分割线 --------\n");
+            } else {
+                tip.innerText = "失败：" + data.msg;
+            }
+        } catch (err) {
+            tip.innerText = "网络请求异常";
+        }
+    }
+</script>
+</body>
+</html>
