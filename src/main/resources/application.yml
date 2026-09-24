@@ -29,7 +29,7 @@ spring:
           host: localhost
           port: 19530
         database: default
-        collection-name: rag_tender_kb
+        collection-name: rag_document_chunks
         initialize-schema: true
         embedding-dimension: 1024  # 👈 加这一行！！！
 

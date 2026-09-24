@@ -104,7 +104,7 @@ services:
     volumes:
       - ${DOCKER_VOLUME_DIRECTORY:-.}/volumes/redis:/data
 
-  # ========== ollama：全部写在 command 里，无外部脚本 ==========
+  # ========== ollama：必须覆盖 entrypoint，否则 command 会被当成 ollama 子命令 ==========
   ollama:
     container_name: ollama
     image: swr.cn-north-4.myhuaweicloud.com/ddn-k8s/docker.io/ollama/ollama:0.30.2
@@ -115,16 +115,17 @@ services:
     restart: always
     networks:
       - milvus
-    # 核心：一条 command 完成：后台启动服务 → 等 → 拉模型 → 前台 wait 不退出
-    command: >
-      sh -c "
+    # 官方镜像 ENTRYPOINT 是 ollama，直接写 sh 会报 unknown command "sh"
+    entrypoint: ["/bin/sh", "-c"]
+    command:
+      - |
         ollama serve &
-        sleep 10;
-        ollama pull deepseek-r1;
-        ollama pull bge-m3;
-        ollama pull nomic-embed-text;
+        sleep 15
+        # 先拉向量模型（文档分块入库立刻可用），再拉对话模型
+        ollama pull bge-m3
+        ollama pull nomic-embed-text
+        ollama pull deepseek-r1
         wait
-      "
   #python 文档解析服务
   doc-parser:
       container_name: doc-parser

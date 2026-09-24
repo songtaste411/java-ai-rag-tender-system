@@ -1,0 +1,146 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <title>知识库问答</title>
+    <style>
+        body { margin: 30px; font-family: sans-serif; max-width: 900px; }
+        .nav a { margin-right: 16px; }
+        .item { margin: 12px 0; }
+        textarea { width: 100%; box-sizing: border-box; }
+        button { padding: 8px 16px; cursor: pointer; margin-right: 8px; }
+        #tip { color: #666; }
+        .hit {
+            border: 1px solid #ddd;
+            padding: 10px;
+            margin: 8px 0;
+            white-space: pre-wrap;
+            background: #fafafa;
+        }
+        #answerBox {
+            border: 1px solid #cde;
+            background: #f5faff;
+            padding: 12px;
+            min-height: 60px;
+            white-space: pre-wrap;
+        }
+        .warn { color: #a60; }
+    </style>
+</head>
+<body>
+<div class="nav">
+    <a href="/static/index.html">文档导入</a>
+    <a href="/static/chat.html"><b>知识库问答</b></a>
+</div>
+
+<h3>知识库问答 / 检索</h3>
+<p>
+    会先立刻检索知识库并展示段落；若勾选 AI，再后台调用 <code>deepseek-r1</code>。
+    <span class="warn">CPU 首次回答可能要 5～15 分钟，请耐心等，不要刷新页面。</span>
+</p>
+
+<div class="item">
+    <textarea id="question" rows="3" placeholder="例如：招标文件对投标人的资质要求是什么？"></textarea>
+</div>
+<div class="item">
+    返回条数：
+    <input type="number" id="topK" value="3" min="1" max="10" style="width:60px">
+    <label>
+        <input type="checkbox" id="withAi" checked>
+        同时让 AI 根据检索结果回答
+    </label>
+</div>
+<div class="item">
+    <button id="askBtn" onclick="ask()">提问</button>
+    <button onclick="searchOnly()">只检索知识库</button>
+</div>
+
+<p id="tip"></p>
+
+<h4>AI 回答</h4>
+<div id="answerBox">还没有提问</div>
+
+<h4>知识库命中段落</h4>
+<div id="hits"></div>
+
+<script>
+    function renderHits(hits) {
+        const hitsBox = document.getElementById('hits');
+        if (!hits || hits.length === 0) {
+            hitsBox.innerHTML = '<p>没有搜到相关内容。请先去「文档导入」上传并完成入库。</p>';
+            return;
+        }
+        hitsBox.innerHTML = hits.map((h, i) =>
+            `<div class="hit"><b>#${i + 1}</b>（距离 ${Number(h.distance).toFixed(4)}）\n${h.content}</div>`
+        ).join('');
+    }
+
+    async function postRag(question, topK, withAi) {
+        const formData = new FormData();
+        formData.append('query', question);
+        formData.append('top_k', topK);
+        formData.append('with_ai', withAi ? '1' : '0');
+        const res = await fetch('/api/rag-chat', { method: 'POST', body: formData });
+        return res.json();
+    }
+
+    async function callRag(withAi) {
+        const tip = document.getElementById('tip');
+        const answerBox = document.getElementById('answerBox');
+        const askBtn = document.getElementById('askBtn');
+        const question = document.getElementById('question').value.trim();
+        const topK = document.getElementById('topK').value;
+        if (!question) {
+            tip.innerText = '请先输入问题';
+            return;
+        }
+
+        askBtn.disabled = true;
+        tip.innerText = '正在检索知识库...';
+        answerBox.innerText = withAi ? '先出检索结果，再生成 AI 回答...' : '（本次只检索）';
+        document.getElementById('hits').innerHTML = '';
+
+        try {
+            // 第 1 步：只检索，通常几秒内返回
+            const searchData = await postRag(question, topK, false);
+            if (searchData.code !== 0) {
+                tip.innerText = '失败：' + searchData.msg;
+                answerBox.innerText = '';
+                return;
+            }
+            renderHits(searchData.hits);
+            tip.innerText = '检索完成';
+
+            if (!withAi) {
+                answerBox.innerText = '（本次只检索，不调用大模型）';
+                return;
+            }
+
+            // 第 2 步：再调 AI（可能很慢）
+            tip.innerText = '检索已完成。正在调用 deepseek-r1 生成回答（CPU 可能要很久，请勿关闭）...';
+            answerBox.innerText = '生成中，请耐心等待...';
+            const aiData = await postRag(question, topK, true);
+            if (aiData.code !== 0) {
+                tip.innerText = 'AI 失败：' + aiData.msg + '（检索结果仍可看）';
+                return;
+            }
+            renderHits(aiData.hits);
+            tip.innerText = aiData.ai_msg || '完成';
+            answerBox.innerText = aiData.answer || (aiData.ai_msg || '暂无 AI 回答，请看下方命中段落');
+        } catch (e) {
+            tip.innerText = '请求异常或被中断。若已显示命中段落，说明检索成功，只是 AI 太慢。';
+        } finally {
+            askBtn.disabled = false;
+        }
+    }
+
+    function ask() {
+        callRag(document.getElementById('withAi').checked);
+    }
+
+    function searchOnly() {
+        callRag(false);
+    }
+</script>
+</body>
+</html>

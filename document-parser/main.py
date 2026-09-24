@@ -2,6 +2,7 @@ from fastapi import FastAPI, UploadFile, Form
 from fastapi.staticfiles import StaticFiles
 from fastapi.responses import RedirectResponse
 from io import BytesIO
+import logging
 import os
 import pdfplumber
 import docx
@@ -18,6 +19,9 @@ from pymilvus import (
     utility
 )
 
+# 屏蔽 pdfminer 对残缺字体信息的刷屏警告（不影响正常抽取文字）
+logging.getLogger("pdfminer").setLevel(logging.ERROR)
+
 app = FastAPI(title="文档解析分块&向量入库服务")
 # 挂载静态页面
 app.mount("/static", StaticFiles(directory="static"), name="static")
@@ -32,7 +36,10 @@ PAGE_TIMEOUT = 5
 HOST_IP = "localhost"
 # Ollama 配置 bge-m3
 OLLAMA_URL = f"http://{HOST_IP}:11434/api/embeddings"
+OLLAMA_GENERATE_URL = f"http://{HOST_IP}:11434/api/generate"
+OLLAMA_CHAT_URL = f"http://{HOST_IP}:11434/api/chat"
 EMBED_MODEL = "bge-m3"
+CHAT_MODEL = "deepseek-r1"
 # bge-m3 向量维度固定 1024
 EMBED_DIM = 1024
 
@@ -204,24 +211,115 @@ async def vector_search(
     top_k: int = Form(3)
 ):
     try:
-        query_vec = get_embedding(query)
-        search_params = {"metric_type": "L2", "params": {"nprobe": 10}}
-        results = milvus_coll.search(
-            data=[query_vec],
-            anns_field="vector",
-            param=search_params,
-            limit=top_k,
-            output_fields=["content"]
-        )
-        res_data = []
-        for hit in results[0]:
-            res_data.append({
-                "content": hit.entity.get("content"),
-                "distance": hit.distance
-            })
+        res_data = search_similar_chunks(query, top_k)
         return {"code": 0, "data": res_data}
     except Exception as e:
         return {"code": 1, "msg": str(e)}
+
+def search_similar_chunks(query: str, top_k: int = 3) -> list:
+    """从知识库检索最相似的文本块"""
+    query_vec = get_embedding(query)
+    search_params = {"metric_type": "L2", "params": {"nprobe": 10}}
+    results = milvus_coll.search(
+        data=[query_vec],
+        anns_field="vector",
+        param=search_params,
+        limit=top_k,
+        output_fields=["content"]
+    )
+    res_data = []
+    for hit in results[0]:
+        res_data.append({
+            "content": hit.entity.get("content"),
+            "distance": float(hit.distance)
+        })
+    return res_data
+
+def ask_ollama_with_context(question: str, contexts: list) -> str:
+    """用检索到的知识库内容 + 问题，调用本地大模型回答。
+    deepseek-r1 默认会先“长思考”，若 num_predict 太小，最终回答会被截成半句。
+    这里用 /api/chat + think=false，把额度留给真正的答案。
+    """
+    # 压缩资料，避免提示词太长导致更慢/更容易超时
+    trimmed = []
+    for i, c in enumerate(contexts[:3]):
+        text = (c.get("content") or "").strip()
+        if len(text) > 500:
+            text = text[:500] + "…"
+        trimmed.append(f"【资料{i+1}】\n{text}")
+    context_text = "\n\n".join(trimmed)
+    user_content = (
+        "你是招投标知识库助手。只依据【资料】回答，不要编造；资料不够就说不知道。"
+        "用完整中文句子回答，不要只写半句。\n\n"
+        f"{context_text}\n\n"
+        f"【问题】{question}"
+    )
+    payload = {
+        "model": CHAT_MODEL,
+        "messages": [
+            {"role": "user", "content": user_content}
+        ],
+        "stream": False,
+        # 顶层参数：关闭思考，避免思考占满生成额度导致答案被截断
+        "think": False,
+        "options": {
+            "num_predict": 1024,
+            "temperature": 0.2
+        }
+    }
+    # (连接超时, 读取超时) —— CPU 推理经常超过 3 分钟
+    resp = requests.post(OLLAMA_CHAT_URL, json=payload, timeout=(30, 900))
+    resp.raise_for_status()
+    data = resp.json()
+    message = data.get("message") or {}
+    answer = (message.get("content") or data.get("response") or "").strip()
+    # 若模型仍夹带思考块，只保留最终回答
+    end_tag = "</" + "think>"
+    if end_tag in answer:
+        answer = answer.split(end_tag, 1)[-1].strip()
+    return answer
+
+@app.post("/api/rag-chat")
+async def rag_chat(
+    query: str = Form(...),
+    top_k: int = Form(3),
+    with_ai: int = Form(1)
+):
+    """
+    知识库问答：
+    1) 先向量检索相关分块
+    2) with_ai=1 时再调用 Ollama 大模型生成回答（模型未就绪/超时则仍返回检索结果）
+    """
+    try:
+        hits = search_similar_chunks(query, top_k)
+        answer = ""
+        ai_msg = ""
+        if with_ai and hits:
+            try:
+                answer = ask_ollama_with_context(query, hits)
+                if not answer:
+                    ai_msg = "模型返回了空内容，请看下方检索段落。"
+            except requests.exceptions.ReadTimeout:
+                ai_msg = (
+                    f"对话模型 {CHAT_MODEL} 在 CPU 上生成超时（可能要 5～15 分钟）。"
+                    "检索结果已返回；可先看下方段落，或取消勾选 AI 只做检索。"
+                )
+            except Exception as e:
+                err = str(e)
+                if "not found" in err.lower() or "404" in err:
+                    ai_msg = f"对话模型 {CHAT_MODEL} 不可用：{err}"
+                else:
+                    ai_msg = f"大模型调用失败：{err}。已返回知识库检索结果。"
+        elif not hits:
+            ai_msg = "知识库里没搜到相关内容，请先在导入页上传文档。"
+        return {
+            "code": 0,
+            "answer": answer,
+            "hits": hits,
+            "ai_msg": ai_msg
+        }
+    except Exception as e:
+        return {"code": 1, "msg": str(e), "answer": "", "hits": [], "ai_msg": ""}
 
 @app.post("/parse-document")
 async def parse_document(file: UploadFile, chunk_size: int = Form(512)):
