@@ -1,0 +1,84 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <title>知识库问答 - 招投标 RAG</title>
+  <style>
+    body { margin: 24px; font-family: sans-serif; max-width: 920px; }
+    .nav a { margin-right: 16px; }
+    .item { margin: 12px 0; }
+    button { padding: 8px 16px; cursor: pointer; margin-right: 8px; }
+    textarea { width: 100%; box-sizing: border-box; }
+    .hit { border: 1px solid #ddd; padding: 10px; margin: 8px 0; white-space: pre-wrap; background: #fafafa; }
+    #answer { border: 1px solid #cde; background: #f5faff; padding: 12px; min-height: 80px; white-space: pre-wrap; }
+    .warn { color: #a60; }
+  </style>
+</head>
+<body>
+<div class="nav">
+  <a href="/index.html">文档导入</a>
+  <a href="/chat.html"><b>知识库问答</b></a>
+</div>
+<h3>知识库问答</h3>
+<p>先检索知识库；勾选 AI 时再调用本地大模型。
+  <span class="warn">CPU 跑 deepseek-r1 可能很慢，可先「只检索」。</span></p>
+<div class="item"><textarea id="q" rows="3" placeholder="例如：投标人资质要求是什么？"></textarea></div>
+<div class="item">
+  topK <input id="topK" type="number" value="5" min="1" max="10" style="width:60px">
+  <label><input id="withAi" type="checkbox" checked> AI 回答</label>
+</div>
+<div class="item">
+  <button onclick="ask(true)">提问</button>
+  <button onclick="ask(false)">只检索</button>
+</div>
+<p id="tip"></p>
+<h4>AI 回答</h4>
+<div id="answer">尚未提问</div>
+<h4>命中段落</h4>
+<div id="hits"></div>
+<script>
+async function ask(withAi) {
+  const tip = document.getElementById('tip');
+  const answer = document.getElementById('answer');
+  const hitsBox = document.getElementById('hits');
+  const q = document.getElementById('q').value.trim();
+  const topK = document.getElementById('topK').value;
+  if (!q) { tip.innerText = '请输入问题'; return; }
+
+  tip.innerText = '检索中...';
+  hitsBox.innerHTML = '';
+  answer.innerText = withAi ? '检索完成后生成回答...' : '（只检索）';
+
+  try {
+    const sRes = await fetch('/api/search?query=' + encodeURIComponent(q) + '&topK=' + topK, { method: 'POST' });
+    const sData = await sRes.json();
+    const hits = sData.hits || [];
+    if (!hits.length) {
+      tip.innerText = '没有命中，请先导入文档';
+      answer.innerText = '';
+      return;
+    }
+    hitsBox.innerHTML = hits.map((h, i) => `<div class="hit"><b>#${i+1}</b>\n${h}</div>`).join('');
+    tip.innerText = '检索完成';
+
+    if (!withAi || !document.getElementById('withAi').checked) {
+      answer.innerText = '（本次只检索）';
+      return;
+    }
+    tip.innerText = '正在生成回答（可能较久）...';
+    answer.innerText = '生成中...';
+    const cRes = await fetch('/api/chat', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ question: q })
+    });
+    const cData = await cRes.json();
+    tip.innerText = cData.code === 0 ? '完成' : ('失败：' + cData.msg);
+    answer.innerText = cData.answer || cData.msg || '';
+  } catch (e) {
+    tip.innerText = '请求失败：' + e;
+  }
+}
+</script>
+</body>
+</html>

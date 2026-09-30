@@ -1,18 +1,20 @@
-﻿version: '3.5'
+﻿# 招投标 RAG —— Docker Compose（第 3 层：容器编排）
+# 用法见 docs/03-compose.md
+# 仅起基础设施（第 1 层本地开发）：docker compose up -d etcd minio standalone redis ollama
 
 services:
   etcd:
     container_name: milvus-etcd
     image: swr.cn-north-4.myhuaweicloud.com/ddn-k8s/quay.io/coreos/etcd:v3.5.5
     environment:
-      - ETCD_AUTO_COMPACTION_MODE=revision
-      - ETCD_AUTO_COMPACTION_RETENTION=1000
-      - ETCD_QUOTA_BACKEND_BYTES=4294967296
-      - ETCD_SNAPSHOT_COUNT=50000
-      - ETCDCTL_API=3
-      - ETCD_UNSUPPORTED_ARCH=amd64
+      ETCD_AUTO_COMPACTION_MODE: revision
+      ETCD_AUTO_COMPACTION_RETENTION: "1000"
+      ETCD_QUOTA_BACKEND_BYTES: "4294967296"
+      ETCD_SNAPSHOT_COUNT: "50000"
+      ETCDCTL_API: "3"
+      ETCD_UNSUPPORTED_ARCH: amd64
     volumes:
-      - ${DOCKER_VOLUME_DIRECTORY:-.}/volumes/etcd:/etcd
+      - ./volumes/etcd:/etcd
     ports:
       - "2379:2379"
     command:
@@ -26,13 +28,7 @@ services:
       - --initial-cluster=milvus-etcd=http://milvus-etcd:2380
       - --initial-cluster-state=new
       - --initial-cluster-token=etcd-cluster-token
-    healthcheck:
-      test: ["CMD", "etcdctl", "--endpoints=http://127.0.0.1:2379", "endpoint", "health"]
-      interval: 5s
-      timeout: 3s
-      retries: 10
-    networks:
-      - milvus
+    networks: [rag]
     user: "root"
 
   minio:
@@ -41,18 +37,15 @@ services:
     environment:
       MINIO_ROOT_USER: minioadmin
       MINIO_ROOT_PASSWORD: minioadmin
-      MINIO_SERVER_URL: http://milvus-minio:9000
-    ports:
-      - "9001:9001"
-      - "9000:9000"
     volumes:
-      - ${DOCKER_VOLUME_DIRECTORY:-.}/volumes/minio:/minio_data
+      - ./volumes/minio:/minio_data
+    ports:
+      - "9000:9000"
+      - "9001:9001"
     command: minio server /minio_data --address ":9000" --console-address ":9001"
-    # 核心：彻底关闭minio健康检查（避免Docker误判，minio本身能正常启动）
-    networks:
-      - milvus
+    networks: [rag]
     user: "root"
-    restart: always  # minio异常时自动重启
+    restart: always
 
   standalone:
     container_name: milvus-standalone
@@ -64,81 +57,82 @@ services:
       MINIO_ROOT_USER: minioadmin
       MINIO_ROOT_PASSWORD: minioadmin
     volumes:
-      - ${DOCKER_VOLUME_DIRECTORY:-.}/volumes/milvus:/var/lib/milvus
+      - ./volumes/milvus:/var/lib/milvus
+    ports:
+      - "19530:19530"
+      - "9091:9091"
+    depends_on: [etcd, minio]
+    networks: [rag]
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost:9091/healthz"]
       interval: 30s
       start_period: 90s
       timeout: 20s
       retries: 3
-    ports:
-      - "19530:19530"
-      - "9091:9091"
-    depends_on:
-      - etcd  # 只保证etcd先启动，不依赖健康检查（避免minio误判导致Milvus启动失败）
-      - minio
-    networks:
-      - milvus
 
-  attu:
-    container_name: milvus-attu
-    image: swr.cn-north-4.myhuaweicloud.com/ddn-k8s/docker.io/zilliz/attu:v2.3.5
-    ports:
-      - "8000:3000"
-    environment:
-      - MILVUS_URL=milvus-standalone:19530
-    depends_on:
-      - standalone
-    networks:
-      - milvus
-    restart: always
-  # ========== 下方新增：Redis + Ollama（按你的镜像/版本追加） ==========
   redis:
     container_name: redis
     image: swr.cn-north-4.myhuaweicloud.com/ddn-k8s/quay.io/opstree/redis:v7.0.5
     ports:
-      - "6379:6379"
-    restart: always
-    networks:
-      - milvus
+      # 宿主机用 6380，避免和本机其它 Redis 抢 6379；容器内仍是 6379
+      - "6380:6379"
     volumes:
-      - ${DOCKER_VOLUME_DIRECTORY:-.}/volumes/redis:/data
+      - ./volumes/redis:/data
+    networks: [rag]
+    restart: always
 
-  # ========== ollama：必须覆盖 entrypoint，否则 command 会被当成 ollama 子命令 ==========
   ollama:
     container_name: ollama
     image: swr.cn-north-4.myhuaweicloud.com/ddn-k8s/docker.io/ollama/ollama:0.30.2
     ports:
       - "11434:11434"
     volumes:
-      - ollama_data:/root/.ollama   # 模型都存在这里
+      - ollama_data:/root/.ollama
+    # 镜像 ENTRYPOINT 已是 ollama，这里只能写 serve
+    command: ["serve"]
+    networks: [rag]
     restart: always
-    networks:
-      - milvus
-    # 官方镜像 ENTRYPOINT 是 ollama，直接写 sh 会报 unknown command "sh"
-    entrypoint: ["/bin/sh", "-c"]
-    command:
-      - |
-        ollama serve &
-        sleep 15
-        # 先拉向量模型（文档分块入库立刻可用），再拉对话模型
-        ollama pull bge-m3
-        ollama pull nomic-embed-text
-        ollama pull deepseek-r1
-        wait
-  #python 文档解析服务
+
+  # —— 业务：解析（只抽文本）——
   doc-parser:
-      container_name: doc-parser
-      build: ./document-parser
-      ports:
-        - "9099:9099"
-      restart: always
+    container_name: doc-parser
+    build: ./document-parser
+    image: rag-doc-parser:latest
+    ports:
+      - "9099:9099"
+    depends_on: [ollama]
+    networks: [rag]
+    restart: always
+
+  # —— 业务：RAG API + 网页 ——
+  rag-api:
+    container_name: rag-api
+    build: .
+    image: rag-api:latest
+    ports:
+      # 宿主机 18081，避免本机 8081 被占用/保留；容器内仍是 8081
+      - "18081:8081"
+    environment:
+      PARSER_BASE_URL: http://doc-parser:9099
+      OLLAMA_BASE_URL: http://ollama:11434
+      MILVUS_HOST: milvus-standalone
+      MILVUS_PORT: "19530"
+      REDIS_HOST: redis
+      REDIS_PORT: "6379"
+      OLLAMA_CHAT_MODEL: deepseek-r1
+      OLLAMA_EMBED_MODEL: bge-m3
+    depends_on:
+      - doc-parser
+      - standalone
+      - ollama
+      - redis
+    networks: [rag]
+    restart: always
 
 networks:
-  milvus:
-    name: milvus
+  rag:
+    name: rag
     driver: bridge
 
 volumes:
   ollama_data:
-    driver: local

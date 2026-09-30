@@ -1,0 +1,80 @@
+# Ollama：镜像 Never 拉取；模型挂 /var/ollama-models（由 ops.ps1 init 从本机卷拷入）
+# 部署前请 docker stop ollama
+apiVersion: v1
+kind: PersistentVolume
+metadata:
+  name: ollama-models-pv
+spec:
+  capacity:
+    storage: 20Gi
+  accessModes: [ReadWriteOnce]
+  persistentVolumeReclaimPolicy: Retain
+  storageClassName: ""
+  hostPath:
+    path: /var/ollama-models
+    type: DirectoryOrCreate
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: ollama-models-pvc
+  namespace: rag-tender
+spec:
+  accessModes: [ReadWriteOnce]
+  storageClassName: ""
+  volumeName: ollama-models-pv
+  resources:
+    requests:
+      storage: 20Gi
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: ollama
+  namespace: rag-tender
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: ollama
+  template:
+    metadata:
+      labels:
+        app: ollama
+    spec:
+      containers:
+        - name: ollama
+          image: swr.cn-north-4.myhuaweicloud.com/ddn-k8s/docker.io/ollama/ollama:0.30.2
+          imagePullPolicy: Never
+          # K8s 的 command 会替换 ENTRYPOINT，必须写成完整 ollama serve
+          command: ["ollama", "serve"]
+          ports:
+            - containerPort: 11434
+          volumeMounts:
+            - name: ollama-data
+              mountPath: /root/.ollama
+          resources:
+            requests:
+              memory: 4Gi
+              cpu: "1"
+            limits:
+              memory: 12Gi
+              cpu: "4"
+      volumes:
+        - name: ollama-data
+          persistentVolumeClaim:
+            claimName: ollama-models-pvc
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: ollama
+  namespace: rag-tender
+spec:
+  type: NodePort
+  selector:
+    app: ollama
+  ports:
+    - port: 11434
+      targetPort: 11434
+      nodePort: 31134

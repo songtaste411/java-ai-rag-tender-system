@@ -3,33 +3,41 @@ package com.rag.service.impl;
 import com.rag.service.RagVectorService;
 import jakarta.annotation.Resource;
 import org.springframework.ai.document.Document;
+import org.springframework.ai.vectorstore.SearchRequest;
 import org.springframework.ai.vectorstore.milvus.MilvusVectorStore;
 import org.springframework.stereotype.Service;
 
 import java.util.List;
+import java.util.UUID;
 
 @Service
 public class RagVectorServiceImpl implements RagVectorService {
 
-    // 🔥 Spring AI 官方 Bean，直接用！
     @Resource
     private MilvusVectorStore milvusVectorStore;
 
-    /**
-     * 保存文本分块（自动生成向量、自动存入 Milvus）
-     */
     @Override
-    public void save(String content) {
-        if (content == null || content.isBlank()) {
-            throw new IllegalArgumentException("内容不能为空");
+    public void saveAll(List<String> chunks) {
+        if (chunks == null || chunks.isEmpty()) {
+            return;
         }
-        milvusVectorStore.add(List.of(new Document(content)));
-        System.out.println("✅ 自动入库 Milvus：" + content.substring(0, 30) + "...");
+        List<Document> docs = chunks.stream()
+                .filter(c -> c != null && !c.isBlank())
+                .map(c -> Document.builder()
+                        .id(UUID.randomUUID().toString())
+                        .text(c)
+                        .build())
+                .toList();
+        if (!docs.isEmpty()) {
+            milvusVectorStore.add(docs);
+        }
     }
 
     @Override
-    public List<String> search(String query) {
-        return milvusVectorStore.similaritySearch(query)
+    public List<String> search(String query, int topK) {
+        int k = Math.max(1, Math.min(topK, 20));
+        return milvusVectorStore.similaritySearch(
+                        SearchRequest.builder().query(query).topK(k).build())
                 .stream()
                 .map(Document::getText)
                 .toList();

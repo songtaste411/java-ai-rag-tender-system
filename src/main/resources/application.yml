@@ -1,44 +1,37 @@
 server:
-  port: 8081
+  port: ${SERVER_PORT:8081}
 
 spring:
-  # Redis 配置
   data:
     redis:
-      host: localhost
-      port: 6379
-
-  # Spring AI 配置
+      host: ${REDIS_HOST:localhost}
+      port: ${REDIS_PORT:6379}
   ai:
-    # Ollama 大模型
     ollama:
-      base-url: http://localhost:11434
+      base-url: ${OLLAMA_BASE_URL:http://localhost:11434}
       chat:
-        model: deepseek-r1
+        model: ${OLLAMA_CHAT_MODEL:deepseek-r1}
         options:
-          timeout: 120000  # 👈 120秒超时（必须！）
+          timeout: 180000
           connect-timeout: 30000
-          read-timeout: 120000
+          read-timeout: 180000
       embedding:
-        model: bge-m3
-
-    # 向量库 Milvus
+        model: ${OLLAMA_EMBED_MODEL:bge-m3}
     vectorstore:
       milvus:
         client:
-          host: localhost
-          port: 19530
+          host: ${MILVUS_HOST:localhost}
+          port: ${MILVUS_PORT:19530}
         database: default
-        collection-name: rag_document_chunks
+        collection-name: ${MILVUS_COLLECTION:rag_kb_v2}
         initialize-schema: true
-        embedding-dimension: 1024  # 👈 加这一行！！！
-
+        embedding-dimension: 1024
   servlet:
     multipart:
       max-file-size: 100MB
       max-request-size: 100MB
-      resolve-lazily: true   # 核心：延迟解析，适配异步
-# python文档解析服务
-python:
+
+# Python 解析服务地址（本地 / Docker / K8s 用环境变量覆盖）
+app:
   parser:
-    enabled: true  # 默认关闭，走Java；开启=true
+    base-url: ${PARSER_BASE_URL:http://127.0.0.1:9099}
